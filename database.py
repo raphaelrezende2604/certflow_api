@@ -1,7 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-DATABASE_URL = "sqlite:///./certflow_api.db"
+DATABASE_URL = "sqlite:///./data/certflow_api.db"
 
 engine = create_engine(
     DATABASE_URL,
@@ -17,5 +17,3 @@ SessionLocal = sessionmaker(
 Base = declarative_base()
 
 
-
-        

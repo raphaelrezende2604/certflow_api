@@ -1,16 +1,78 @@
-from fastapi import FastAPI, Depends, HTTPException
+import os
+from datetime import datetime, timedelta
+from schemas.auth_schema import RegisterRequest, LoginRequest, AdminLoginRequest
+from schemas.admin_schema import AtivarPagoRequest, EmailRequest, DeviceRequest
+from routers.admin_router import router as admin_router
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, Depends, HTTPException, Header, Request
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
-from datetime import datetime, timedelta
+
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from database import Base, engine, SessionLocal
 from models import Usuario, Licenca, Dispositivo
-from auth import gerar_hash_senha, verificar_senha, criar_token
+from auth import gerar_hash_senha, verificar_senha, criar_token, validar_token
+
+
+load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+ADMIN_SECRET = os.getenv("ADMIN_SECRET")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
+
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY não configurada no .env")
+
+if not ADMIN_SECRET:
+    raise RuntimeError("ADMIN_SECRET não configurada no .env")
 
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="CertFlow API")
+limiter = Limiter(key_func=get_remote_address)
+
+app = FastAPI(
+    title="CertFlow API",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None
+)
+
+
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+origins = (
+    ["*"]
+    if ALLOWED_ORIGINS == "*"
+    else [origin.strip() for origin in ALLOWED_ORIGINS.split(",")]
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type", "X-Admin-Secret"],
+)
+
+app.include_router(admin_router)
+
+
+
+
+@app.exception_handler(RateLimitExceeded)
+def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    raise HTTPException(
+        status_code=429,
+        detail="Muitas requisições. Tente novamente em alguns minutos."
+    )
 
 
 def get_db():
@@ -21,31 +83,60 @@ def get_db():
         db.close()
 
 
-class RegisterRequest(BaseModel):
-    nome: str
-    email: EmailStr
-    senha: str
-    device_id: str
-    nome_maquina: str
-    sistema: str
+def exigir_admin(
+    authorization: str | None = Header(default=None),
+    x_admin_secret: str | None = Header(default=None)
+):
+    if x_admin_secret != ADMIN_SECRET:
+        raise HTTPException(
+            status_code=403,
+            detail="Acesso administrativo negado."
+        )
 
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Token administrativo ausente."
+        )
 
-class LoginRequest(BaseModel):
-    email: EmailStr
-    senha: str
-    device_id: str
-    nome_maquina: str
-    sistema: str
+    token = authorization.replace("Bearer ", "")
+    payload = validar_token(token)
+
+    if not payload:
+        raise HTTPException(
+            status_code=401,
+            detail="Token inválido ou expirado."
+        )
+
+    if payload.get("role") != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Usuário não possui permissão administrativa."
+        )
+
+    return payload
+
 
 
 @app.get("/")
 def home():
-    return {"status": "CertFlow API online"}
+    return {
+        "status": "CertFlow API online",
+        "environment": os.getenv("ENVIRONMENT", "development"),
+        "version": os.getenv("API_VERSION", "1.0")
+    }
 
 
 @app.post("/register")
-def register(data: RegisterRequest, db: Session = Depends(get_db)):
-    usuario_existente = db.query(Usuario).filter(Usuario.email == data.email).first()
+@limiter.limit("10/minute")
+def register(
+    request: Request,
+    data: RegisterRequest,
+    db: Session = Depends(get_db)
+):
+    usuario_existente = db.query(Usuario).filter(
+        Usuario.email == data.email
+    ).first()
 
     if usuario_existente:
         raise HTTPException(status_code=400, detail="E-mail já cadastrado.")
@@ -81,7 +172,11 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
     db.add(dispositivo)
     db.commit()
 
-    token = criar_token({"sub": usuario.email, "usuario_id": usuario.id})
+    token = criar_token({
+        "sub": usuario.email,
+        "usuario_id": usuario.id,
+        "role": "user"
+    })
 
     return {
         "token": token,
@@ -94,13 +189,25 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/login")
-def login(data: LoginRequest, db: Session = Depends(get_db)):
-    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
+@limiter.limit("10/minute")
+def login(
+    request: Request,
+    data: LoginRequest,
+    db: Session = Depends(get_db)
+):
+    usuario = db.query(Usuario).filter(
+        Usuario.email == data.email
+    ).first()
 
     if not usuario or not verificar_senha(data.senha, usuario.senha_hash):
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
 
-    licenca = db.query(Licenca).filter(Licenca.usuario_id == usuario.id).first()
+    if not usuario.ativo:
+        raise HTTPException(status_code=403, detail="Usuário bloqueado.")
+
+    licenca = db.query(Licenca).filter(
+        Licenca.usuario_id == usuario.id
+    ).first()
 
     if not licenca:
         raise HTTPException(status_code=403, detail="Licença não encontrada.")
@@ -135,7 +242,11 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         db.add(novo_dispositivo)
         db.commit()
 
-    token = criar_token({"sub": usuario.email, "usuario_id": usuario.id})
+    token = criar_token({
+        "sub": usuario.email,
+        "usuario_id": usuario.id,
+        "role": "user"
+    })
 
     return {
         "token": token,
@@ -147,14 +258,59 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
     }
 
 
+@app.post("/admin/login")
+@limiter.limit("5/minute")
+def admin_login(
+    request: Request,
+    data: AdminLoginRequest,
+    db: Session = Depends(get_db)
+):
+    usuario = db.query(Usuario).filter(
+        Usuario.email == data.email
+    ).first()
+
+    if not usuario or not verificar_senha(data.senha, usuario.senha_hash):
+        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
+
+    if usuario.email not in [
+        "raphaelrezende490@gmail.com",
+        "reezenderaphael@gmail.com"
+    ]:
+        raise HTTPException(status_code=403, detail="Usuário não é administrador.")
+
+    token = criar_token({
+        "sub": usuario.email,
+        "usuario_id": usuario.id,
+        "role": "admin"
+    })
+
+    return {
+        "token": token,
+        "admin": {
+            "id": usuario.id,
+            "nome": usuario.nome,
+            "email": usuario.email
+        }
+    }
+
+
 @app.post("/license/check")
-def check_license(data: LoginRequest, db: Session = Depends(get_db)):
-    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
+@limiter.limit("30/minute")
+def check_license(
+    request: Request,
+    data: LoginRequest,
+    db: Session = Depends(get_db)
+):
+    usuario = db.query(Usuario).filter(
+        Usuario.email == data.email
+    ).first()
 
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
 
-    licenca = db.query(Licenca).filter(Licenca.usuario_id == usuario.id).first()
+    licenca = db.query(Licenca).filter(
+        Licenca.usuario_id == usuario.id
+    ).first()
 
     if not licenca:
         raise HTTPException(status_code=403, detail="Licença não encontrada.")
@@ -181,18 +337,28 @@ def check_license(data: LoginRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/admin/ativar-pago")
-def ativar_pago(email: EmailStr, plano: str = "individual", db: Session = Depends(get_db)):
-    usuario = db.query(Usuario).filter(Usuario.email == email).first()
+@limiter.limit("10/minute")
+def ativar_pago(
+    request: Request,
+    data: AtivarPagoRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    usuario = db.query(Usuario).filter(
+        Usuario.email == data.email
+    ).first()
 
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
 
-    licenca = db.query(Licenca).filter(Licenca.usuario_id == usuario.id).first()
+    licenca = db.query(Licenca).filter(
+        Licenca.usuario_id == usuario.id
+    ).first()
 
     if not licenca:
         raise HTTPException(status_code=404, detail="Licença não encontrada.")
 
-    if plano == "empresa":
+    if data.plano == "empresa":
         licenca.plano = "empresa"
         licenca.limite_dispositivos = 4
     else:
@@ -206,9 +372,119 @@ def ativar_pago(email: EmailStr, plano: str = "individual", db: Session = Depend
 
     return {
         "message": "Licença ativada com sucesso.",
-        "email": email,
+        "email": data.email,
         "plano": licenca.plano,
         "expira_em": licenca.expira_em.isoformat()
     }
 
-    
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "certflow-api",
+        "environment": os.getenv("ENVIRONMENT", "production"),
+        "version": os.getenv("API_VERSION", "1.0")
+    }
+
+
+
+
+
+@app.get("/admin/devices")
+def admin_devices(
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    dispositivos = db.query(Dispositivo).order_by(Dispositivo.id.desc()).all()
+
+    return [
+        {
+            "id": d.id,
+            "usuario_id": d.usuario_id,
+            "email": d.usuario.email if d.usuario else None,
+            "device_id": d.device_id,
+            "nome_maquina": d.nome_maquina,
+            "sistema": d.sistema,
+            "ativo": d.ativo,
+            "criado_em": d.criado_em.isoformat() if d.criado_em else None
+        }
+        for d in dispositivos
+    ]
+
+
+@app.post("/admin/block-user")
+def admin_block_user(
+    data: EmailRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
+
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    usuario.ativo = False
+    db.commit()
+
+    return {"message": "Usuário bloqueado com sucesso.", "email": data.email}
+
+
+@app.post("/admin/unblock-user")
+def admin_unblock_user(
+    data: EmailRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
+
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    usuario.ativo = True
+    db.commit()
+
+    return {"message": "Usuário desbloqueado com sucesso.", "email": data.email}
+
+
+@app.post("/admin/deactivate-license")
+def admin_deactivate_license(
+    data: EmailRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
+
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    licenca = db.query(Licenca).filter(Licenca.usuario_id == usuario.id).first()
+
+    if not licenca:
+        raise HTTPException(status_code=404, detail="Licença não encontrada.")
+
+    licenca.status = "inactive"
+    db.commit()
+
+    return {"message": "Licença desativada.", "email": data.email}
+
+
+@app.post("/admin/remove-device")
+def admin_remove_device(
+    data: DeviceRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    dispositivo = db.query(Dispositivo).filter(
+        Dispositivo.device_id == data.device_id
+    ).first()
+
+    if not dispositivo:
+        raise HTTPException(status_code=404, detail="Dispositivo não encontrado.")
+
+    dispositivo.ativo = False
+    db.commit()
+
+    return {"message": "Dispositivo removido/bloqueado.", "device_id": data.device_id}
+
+
+

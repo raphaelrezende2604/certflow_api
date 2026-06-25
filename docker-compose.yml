@@ -1,0 +1,16 @@
+services:
+
+  certflow-api:
+
+    build: .
+
+    container_name: certflow-api
+
+    restart: always
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    volumes:
+      - ./data:/app/data
+

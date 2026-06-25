@@ -1,0 +1,12 @@
+.env
+*.db
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+data/
+criar_admin.py
+main.py.save
