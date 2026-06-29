@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 from schemas.auth_schema import RegisterRequest, LoginRequest, AdminLoginRequest
 from schemas.admin_schema import AtivarPagoRequest, EmailRequest, DeviceRequest
 from routers.admin_router import router as admin_router
+from routers.auth_router import router as auth_router
+from routers.license_router import router as license_router
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Header, Request
@@ -63,7 +65,8 @@ app.add_middleware(
 )
 
 app.include_router(admin_router)
-
+app.include_router(auth_router)
+app.include_router(license_router)
 
 
 
@@ -127,136 +130,6 @@ def home():
     }
 
 
-@app.post("/register")
-@limiter.limit("10/minute")
-def register(
-    request: Request,
-    data: RegisterRequest,
-    db: Session = Depends(get_db)
-):
-    usuario_existente = db.query(Usuario).filter(
-        Usuario.email == data.email
-    ).first()
-
-    if usuario_existente:
-        raise HTTPException(status_code=400, detail="E-mail já cadastrado.")
-
-    usuario = Usuario(
-        nome=data.nome,
-        email=data.email,
-        senha_hash=gerar_hash_senha(data.senha),
-        ativo=True
-    )
-
-    db.add(usuario)
-    db.commit()
-    db.refresh(usuario)
-
-    licenca = Licenca(
-        usuario_id=usuario.id,
-        plano="trial",
-        status="trial",
-        limite_dispositivos=1,
-        expira_em=datetime.utcnow() + timedelta(days=1)
-    )
-
-    dispositivo = Dispositivo(
-        usuario_id=usuario.id,
-        device_id=data.device_id,
-        nome_maquina=data.nome_maquina,
-        sistema=data.sistema,
-        ativo=True
-    )
-
-    db.add(licenca)
-    db.add(dispositivo)
-    db.commit()
-
-    token = criar_token({
-        "sub": usuario.email,
-        "usuario_id": usuario.id,
-        "role": "user"
-    })
-
-    return {
-        "token": token,
-        "usuario": {
-            "id": usuario.id,
-            "nome": usuario.nome,
-            "email": usuario.email
-        }
-    }
-
-
-@app.post("/login")
-@limiter.limit("10/minute")
-def login(
-    request: Request,
-    data: LoginRequest,
-    db: Session = Depends(get_db)
-):
-    usuario = db.query(Usuario).filter(
-        Usuario.email == data.email
-    ).first()
-
-    if not usuario or not verificar_senha(data.senha, usuario.senha_hash):
-        raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
-
-    if not usuario.ativo:
-        raise HTTPException(status_code=403, detail="Usuário bloqueado.")
-
-    licenca = db.query(Licenca).filter(
-        Licenca.usuario_id == usuario.id
-    ).first()
-
-    if not licenca:
-        raise HTTPException(status_code=403, detail="Licença não encontrada.")
-
-    dispositivos_ativos = db.query(Dispositivo).filter(
-        Dispositivo.usuario_id == usuario.id,
-        Dispositivo.ativo == True
-    ).all()
-
-    dispositivo_atual = None
-
-    for d in dispositivos_ativos:
-        if d.device_id == data.device_id:
-            dispositivo_atual = d
-            break
-
-    if not dispositivo_atual:
-        if len(dispositivos_ativos) >= licenca.limite_dispositivos:
-            raise HTTPException(
-                status_code=403,
-                detail="Limite de dispositivos atingido para este plano."
-            )
-
-        novo_dispositivo = Dispositivo(
-            usuario_id=usuario.id,
-            device_id=data.device_id,
-            nome_maquina=data.nome_maquina,
-            sistema=data.sistema,
-            ativo=True
-        )
-
-        db.add(novo_dispositivo)
-        db.commit()
-
-    token = criar_token({
-        "sub": usuario.email,
-        "usuario_id": usuario.id,
-        "role": "user"
-    })
-
-    return {
-        "token": token,
-        "usuario": {
-            "id": usuario.id,
-            "nome": usuario.nome,
-            "email": usuario.email
-        }
-    }
-
 
 @app.post("/admin/login")
 @limiter.limit("5/minute")
@@ -294,89 +167,6 @@ def admin_login(
     }
 
 
-@app.post("/license/check")
-@limiter.limit("30/minute")
-def check_license(
-    request: Request,
-    data: LoginRequest,
-    db: Session = Depends(get_db)
-):
-    usuario = db.query(Usuario).filter(
-        Usuario.email == data.email
-    ).first()
-
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-
-    licenca = db.query(Licenca).filter(
-        Licenca.usuario_id == usuario.id
-    ).first()
-
-    if not licenca:
-        raise HTTPException(status_code=403, detail="Licença não encontrada.")
-
-    dispositivo = db.query(Dispositivo).filter(
-        Dispositivo.usuario_id == usuario.id,
-        Dispositivo.device_id == data.device_id,
-        Dispositivo.ativo == True
-    ).first()
-
-    if not dispositivo:
-        raise HTTPException(status_code=403, detail="Dispositivo não autorizado.")
-
-    ativo = licenca.expira_em > datetime.utcnow()
-
-    return {
-        "active": ativo,
-        "plan": licenca.plano,
-        "status": licenca.status,
-        "expires_at": licenca.expira_em.isoformat(),
-        "devices_limit": licenca.limite_dispositivos,
-        "device_authorized": True
-    }
-
-
-@app.post("/admin/ativar-pago")
-@limiter.limit("10/minute")
-def ativar_pago(
-    request: Request,
-    data: AtivarPagoRequest,
-    admin=Depends(exigir_admin),
-    db: Session = Depends(get_db)
-):
-    usuario = db.query(Usuario).filter(
-        Usuario.email == data.email
-    ).first()
-
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-
-    licenca = db.query(Licenca).filter(
-        Licenca.usuario_id == usuario.id
-    ).first()
-
-    if not licenca:
-        raise HTTPException(status_code=404, detail="Licença não encontrada.")
-
-    if data.plano == "empresa":
-        licenca.plano = "empresa"
-        licenca.limite_dispositivos = 4
-    else:
-        licenca.plano = "individual"
-        licenca.limite_dispositivos = 1
-
-    licenca.status = "active"
-    licenca.expira_em = datetime.utcnow() + timedelta(days=30)
-
-    db.commit()
-
-    return {
-        "message": "Licença ativada com sucesso.",
-        "email": data.email,
-        "plano": licenca.plano,
-        "expira_em": licenca.expira_em.isoformat()
-    }
-
 @app.get("/health")
 def health():
     return {
@@ -385,8 +175,6 @@ def health():
         "environment": os.getenv("ENVIRONMENT", "production"),
         "version": os.getenv("API_VERSION", "1.0")
     }
-
-
 
 
 
@@ -410,81 +198,4 @@ def admin_devices(
         }
         for d in dispositivos
     ]
-
-
-@app.post("/admin/block-user")
-def admin_block_user(
-    data: EmailRequest,
-    admin=Depends(exigir_admin),
-    db: Session = Depends(get_db)
-):
-    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
-
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-
-    usuario.ativo = False
-    db.commit()
-
-    return {"message": "Usuário bloqueado com sucesso.", "email": data.email}
-
-
-@app.post("/admin/unblock-user")
-def admin_unblock_user(
-    data: EmailRequest,
-    admin=Depends(exigir_admin),
-    db: Session = Depends(get_db)
-):
-    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
-
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-
-    usuario.ativo = True
-    db.commit()
-
-    return {"message": "Usuário desbloqueado com sucesso.", "email": data.email}
-
-
-@app.post("/admin/deactivate-license")
-def admin_deactivate_license(
-    data: EmailRequest,
-    admin=Depends(exigir_admin),
-    db: Session = Depends(get_db)
-):
-    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
-
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-
-    licenca = db.query(Licenca).filter(Licenca.usuario_id == usuario.id).first()
-
-    if not licenca:
-        raise HTTPException(status_code=404, detail="Licença não encontrada.")
-
-    licenca.status = "inactive"
-    db.commit()
-
-    return {"message": "Licença desativada.", "email": data.email}
-
-
-@app.post("/admin/remove-device")
-def admin_remove_device(
-    data: DeviceRequest,
-    admin=Depends(exigir_admin),
-    db: Session = Depends(get_db)
-):
-    dispositivo = db.query(Dispositivo).filter(
-        Dispositivo.device_id == data.device_id
-    ).first()
-
-    if not dispositivo:
-        raise HTTPException(status_code=404, detail="Dispositivo não encontrado.")
-
-    dispositivo.ativo = False
-    db.commit()
-
-    return {"message": "Dispositivo removido/bloqueado.", "device_id": data.device_id}
-
-
 

@@ -106,3 +106,145 @@ def admin_licenses(
         }
         for l in licencas
     ]  
+
+
+@router.get("/devices")
+def admin_devices(
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    dispositivos = db.query(Dispositivo).order_by(Dispositivo.id.desc()).all()
+
+    return [
+        {
+            "id": d.id,
+            "usuario_id": d.usuario_id,
+            "email": d.usuario.email if d.usuario else None,
+            "device_id": d.device_id,
+            "nome_maquina": d.nome_maquina,
+            "sistema": d.sistema,
+            "fingerprint": d.fingerprint,
+            "ultimo_ip": d.ultimo_ip,
+            "ultimo_acesso": d.ultimo_acesso.isoformat() if d.ultimo_acesso else None,
+            "ativo": d.ativo,
+            "criado_em": d.criado_em.isoformat() if d.criado_em else None
+        }
+        for d in dispositivos
+    ]
+
+
+
+@router.post("/block-user")
+def admin_block_user(
+    data: EmailRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
+
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    usuario.ativo = False
+    db.commit()
+
+    return {"message": "Usuário bloqueado com sucesso.", "email": data.email}
+
+
+@router.post("/unblock-user")
+def admin_unblock_user(
+    data: EmailRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
+
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    usuario.ativo = True
+    db.commit()
+
+    return {"message": "Usuário desbloqueado com sucesso.", "email": data.email}
+
+
+@router.post("/deactivate-license")
+def admin_deactivate_license(
+    data: EmailRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
+
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    licenca = db.query(Licenca).filter(Licenca.usuario_id == usuario.id).first()
+
+    if not licenca:
+        raise HTTPException(status_code=404, detail="Licença não encontrada.")
+
+    licenca.status = "inactive"
+    db.commit()
+
+    return {"message": "Licença desativada.", "email": data.email}
+
+
+@router.post("/remove-device")
+def admin_remove_device(
+    data: DeviceRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    dispositivo = db.query(Dispositivo).filter(
+        Dispositivo.device_id == data.device_id
+    ).first()
+
+    if not dispositivo:
+        raise HTTPException(status_code=404, detail="Dispositivo não encontrado.")
+
+    dispositivo.ativo = False
+    db.commit()
+
+    return {"message": "Dispositivo removido/bloqueado.", "device_id": data.device_id}
+
+
+
+@router.post("/ativar-pago")
+def ativar_pago(
+    data: AtivarPagoRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    usuario = db.query(Usuario).filter(
+        Usuario.email == data.email
+    ).first()
+
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+
+    licenca = db.query(Licenca).filter(
+        Licenca.usuario_id == usuario.id
+    ).first()
+
+    if not licenca:
+        raise HTTPException(status_code=404, detail="Licença não encontrada.")
+
+    if data.plano == "empresa":
+        licenca.plano = "empresa"
+        licenca.limite_dispositivos = 4
+    else:
+        licenca.plano = "individual"
+        licenca.limite_dispositivos = 1
+
+    licenca.status = "active"
+    licenca.expira_em = datetime.utcnow() + timedelta(days=30)
+
+    db.commit()
+
+    return {
+        "message": "Licença ativada com sucesso.",
+        "email": data.email,
+        "plano": licenca.plano,
+        "expira_em": licenca.expira_em.isoformat()
+    }

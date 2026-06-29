@@ -8,3 +8,4 @@ requests
 mercadopago
 passlib[bcrypt]
 slowapi
+cryptography

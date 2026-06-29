@@ -69,7 +69,10 @@ class Dispositivo(Base):
     sistema = Column(String)
 
     ativo = Column(Boolean, default=True)
-
+    fingerprint = Column(String)
+    ultimo_ip = Column(String)
+    ultimo_acesso = Column(DateTime)
+    
     criado_em = Column(
         DateTime,
         default=datetime.utcnow

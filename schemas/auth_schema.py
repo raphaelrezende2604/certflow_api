@@ -8,7 +8,7 @@ class RegisterRequest(BaseModel):
     device_id: str
     nome_maquina: str
     sistema: str
-
+    fingerprint: str | None = None
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -16,7 +16,7 @@ class LoginRequest(BaseModel):
     device_id: str
     nome_maquina: str
     sistema: str
-
+    fingerprint: str | None = None
 
 class AdminLoginRequest(BaseModel):
     email: EmailStr
