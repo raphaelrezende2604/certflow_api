@@ -2,12 +2,17 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+from models import Usuario, Licenca, Dispositivo, OfflineTicket
 
 from database import SessionLocal
 from models import Usuario, Licenca, Dispositivo
 from auth import gerar_hash_senha, verificar_senha, criar_token
 from schemas.auth_schema import RegisterRequest, LoginRequest, AdminLoginRequest
-from services.offline_ticket_service import gerar_ticket_offline
+from services.ticket_service import emitir_ticket_offline
+from services.audit_service import registrar_auditoria
+from services.audit_events import AuditEvents
+
+
 
 
 router = APIRouter(tags=["Auth"])
@@ -81,6 +86,17 @@ def register(
     fingerprint=data.fingerprint,
     license_expires_at=licenca.expira_em)
 
+    offline_registro = OfflineTicket(
+    ticket_id=ticket_offline["ticket_id"],
+    usuario_id=usuario.id,
+    device_id=data.device_id,
+    fingerprint=data.fingerprint,
+    valido_ate=datetime.fromisoformat(ticket_offline["offline_valid_until"])
+    )
+
+    db.add(offline_registro)
+    db.commit()
+
 
 
     return {
@@ -105,6 +121,14 @@ def login(
     ).first()
 
     if not usuario or not verificar_senha(data.senha, usuario.senha_hash):
+        registrar_auditoria(
+            db=db,
+            event=AuditEvents.LOGIN_FAILED,
+            message="Tentativa de login com credenciais inválidas.",
+            email=data.email,
+            device_id=data.device_id,
+            fingerprint=data.fingerprint
+    )
         raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
 
     if not usuario.ativo:
@@ -179,6 +203,34 @@ def login(
         "role": "user"
     })
 
+    ticket_offline = emitir_ticket_offline(
+        db=db,
+        usuario_id=usuario.id,
+        email=usuario.email,
+        plano=licenca.plano,
+        status=licenca.status,
+        device_id=data.device_id,
+        fingerprint=data.fingerprint,
+        license_expires_at=licenca.expira_em
+    )
+
+    registrar_auditoria(
+    db=db,
+    event=AuditEvents.LOGIN_SUCCESS,
+    message="Login realizado com sucesso.",
+    usuario_id=usuario.id,
+    email=usuario.email,
+    ip=ip_cliente,
+    device_id=data.device_id,
+    fingerprint=data.fingerprint,
+    metadata={
+        "plano": licenca.plano,
+        "status": licenca.status
+    }
+)
+
+
+
     return {
         "token": token,
         "usuario": {
@@ -191,5 +243,6 @@ def login(
             "status": licenca.status,
             "expira_em": licenca.expira_em.isoformat(),
             "limite_dispositivos": licenca.limite_dispositivos
-        }
-    }        
+        },
+        "offline": ticket_offline
+    }

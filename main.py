@@ -5,12 +5,15 @@ from schemas.admin_schema import AtivarPagoRequest, EmailRequest, DeviceRequest
 from routers.admin_router import router as admin_router
 from routers.auth_router import router as auth_router
 from routers.license_router import router as license_router
+from routers.update_router import router as update_router
+
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
+from routers.heartbeat_router import router as heartbeat_router
 
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -67,6 +70,8 @@ app.add_middleware(
 app.include_router(admin_router)
 app.include_router(auth_router)
 app.include_router(license_router)
+app.include_router(heartbeat_router)
+app.include_router(update_router)
 
 
 

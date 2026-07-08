@@ -1,12 +1,16 @@
 from datetime import datetime, timedelta
-
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
-
 from database import SessionLocal
-from models import Usuario, Licenca, Dispositivo
+from models import Usuario, Licenca, Dispositivo, OfflineTicket, AuditLog
 from auth import validar_token
 from schemas.admin_schema import AtivarPagoRequest, EmailRequest, DeviceRequest
+from services.audit_service import registrar_auditoria
+from services.audit_events import AuditEvents
+from models import AppUpdate
+from schemas.update_schema import UpdateCreateRequest
+from schemas.update_schema import UpdateCreateRequest, UpdateStatusRequest
+
 
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -204,10 +208,86 @@ def admin_remove_device(
         raise HTTPException(status_code=404, detail="Dispositivo não encontrado.")
 
     dispositivo.ativo = False
+
+    tickets_revogados = db.query(OfflineTicket).filter(
+        OfflineTicket.device_id == data.device_id,
+        OfflineTicket.revogado == False
+    ).all()
+
+    for ticket in tickets_revogados:
+        ticket.revogado = True
+        ticket.revogado_em = datetime.utcnow()
+        ticket.motivo_revogacao = "Dispositivo removido/bloqueado pelo administrador."
+
+    registrar_auditoria(
+        db=db,
+        event=AuditEvents.DEVICE_BLOCKED,
+        message="Dispositivo bloqueado pelo administrador.",
+        usuario_id=dispositivo.usuario_id,
+        email=dispositivo.usuario.email if dispositivo.usuario else None,
+        device_id=data.device_id,
+        fingerprint=dispositivo.fingerprint,
+        metadata={
+            "tickets_revogados": len(tickets_revogados)
+        }
+    )
+
+    registrar_auditoria(
+        db=db,
+        event=AuditEvents.OFFLINE_TICKET_REVOKED,
+        message="Tickets offline revogados por bloqueio de dispositivo.",
+        usuario_id=dispositivo.usuario_id,
+        email=dispositivo.usuario.email if dispositivo.usuario else None,
+        device_id=data.device_id,
+        fingerprint=dispositivo.fingerprint,
+        metadata={
+            "tickets_revogados": len(tickets_revogados)
+        }
+    )
+
     db.commit()
 
-    return {"message": "Dispositivo removido/bloqueado.", "device_id": data.device_id}
+    return {
+        "message": "Dispositivo removido/bloqueado e tickets revogados.",
+        "device_id": data.device_id,
+        "tickets_revogados": len(tickets_revogados)
+    }
 
+
+
+
+
+@router.post("/restore-device")
+def admin_restore_device(
+    data: DeviceRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    dispositivo = db.query(Dispositivo).filter(
+        Dispositivo.device_id == data.device_id
+    ).first()
+
+    if not dispositivo:
+        raise HTTPException(status_code=404, detail="Dispositivo não encontrado.")
+
+    dispositivo.ativo = True
+
+    registrar_auditoria(
+        db=db,
+        event=AuditEvents.DEVICE_AUTHORIZED,
+        message="Dispositivo reativado pelo administrador.",
+        usuario_id=dispositivo.usuario_id,
+        email=dispositivo.usuario.email if dispositivo.usuario else None,
+        device_id=data.device_id,
+        fingerprint=dispositivo.fingerprint
+    )
+
+    db.commit()
+
+    return {
+        "message": "Dispositivo reativado com sucesso.",
+        "device_id": data.device_id
+    }
 
 
 @router.post("/ativar-pago")
@@ -247,4 +327,156 @@ def ativar_pago(
         "email": data.email,
         "plano": licenca.plano,
         "expira_em": licenca.expira_em.isoformat()
+    }
+
+
+
+@router.get("/audit-logs")
+def admin_audit_logs(
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    logs = db.query(AuditLog).order_by(AuditLog.id.desc()).limit(100).all()
+
+    return [
+        {
+            "id": log.id,
+            "usuario_id": log.usuario_id,
+            "email": log.email,
+            "event_code": log.event_code,
+            "event_type": log.event_type,
+            "message": log.message,
+            "ip": log.ip,
+            "device_id": log.device_id,
+            "fingerprint": log.fingerprint,
+            "metadata": log.metadata_json,
+            "criado_em": log.criado_em.isoformat() if log.criado_em else None
+        }
+        for log in logs
+    ]
+
+
+@router.get("/offline-tickets")
+def admin_offline_tickets(
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    tickets = (
+        db.query(OfflineTicket)
+        .order_by(OfflineTicket.id.desc())
+        .all()
+    )
+
+    return [
+        {
+            "id": t.id,
+            "ticket_id": t.ticket_id,
+            "usuario_id": t.usuario_id,
+            "device_id": t.device_id,
+            "fingerprint": t.fingerprint,
+            "emitido_em": t.emitido_em.isoformat() if t.emitido_em else None,
+            "valido_ate": t.valido_ate.isoformat() if t.valido_ate else None,
+            "revogado": t.revogado,
+            "revogado_em": t.revogado_em.isoformat() if t.revogado_em else None,
+            "motivo_revogacao": t.motivo_revogacao
+        }
+        for t in tickets
+    ]
+
+
+@router.post("/updates")
+def admin_create_update(
+    data: UpdateCreateRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    update = AppUpdate(
+        app_name=data.app_name,
+        version=data.version,
+        min_required_version=data.min_required_version,
+        download_url=data.download_url,
+        changelog=data.changelog,
+        obrigatorio=data.obrigatorio,
+        ativo=True
+    )
+
+    db.add(update)
+    db.commit()
+    db.refresh(update)
+
+    return {
+        "message": "Atualização cadastrada com sucesso.",
+        "id": update.id,
+        "app_name": update.app_name,
+        "version": update.version,
+        "obrigatorio": update.obrigatorio
+    }
+
+
+
+@router.get("/updates")
+def admin_list_updates(
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    updates = db.query(AppUpdate).order_by(AppUpdate.id.desc()).all()
+
+    return [
+        {
+            "id": u.id,
+            "app_name": u.app_name,
+            "version": u.version,
+            "min_required_version": u.min_required_version,
+            "download_url": u.download_url,
+            "changelog": u.changelog.splitlines() if u.changelog else [],
+            "ativo": u.ativo,
+            "obrigatorio": u.obrigatorio,
+            "criado_em": u.criado_em.isoformat() if u.criado_em else None
+        }
+        for u in updates
+    ]
+
+
+
+@router.post("/updates/deactivate")
+def admin_deactivate_update(
+    data: UpdateStatusRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    update = db.query(AppUpdate).filter(AppUpdate.id == data.update_id).first()
+
+    if not update:
+        raise HTTPException(status_code=404, detail="Atualização não encontrada.")
+
+    update.ativo = False
+    db.commit()
+
+    return {
+        "message": "Atualização desativada com sucesso.",
+        "id": update.id,
+        "version": update.version,
+        "ativo": update.ativo
+    }
+
+
+@router.post("/updates/require")
+def admin_require_update(
+    data: UpdateStatusRequest,
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    update = db.query(AppUpdate).filter(AppUpdate.id == data.update_id).first()
+
+    if not update:
+        raise HTTPException(status_code=404, detail="Atualização não encontrada.")
+
+    update.obrigatorio = True
+    db.commit()
+
+    return {
+        "message": "Atualização marcada como obrigatória.",
+        "id": update.id,
+        "version": update.version,
+        "obrigatorio": update.obrigatorio
     }

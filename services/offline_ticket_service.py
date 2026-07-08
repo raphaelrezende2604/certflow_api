@@ -1,30 +1,47 @@
-import os
-import hmac
-import json
-import hashlib
 import base64
+import json
+import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.exceptions import InvalidSignature
 
 
-OFFLINE_TICKET_SECRET = os.getenv("OFFLINE_TICKET_SECRET")
+PRIVATE_KEY_PATH = Path("keys/offline_ticket_private.pem")
+PUBLIC_KEY_PATH = Path("keys/offline_ticket_public.pem")
 
 
-if not OFFLINE_TICKET_SECRET:
-    raise RuntimeError("OFFLINE_TICKET_SECRET não configurada no .env")
+def _carregar_chave_privada():
+    private_bytes = PRIVATE_KEY_PATH.read_bytes()
+    return serialization.load_pem_private_key(
+        private_bytes,
+        password=None
+    )
+
+
+def _carregar_chave_publica():
+    public_bytes = PUBLIC_KEY_PATH.read_bytes()
+    return serialization.load_pem_public_key(public_bytes)
+
+
+def _serializar_payload(payload: dict) -> bytes:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":")
+    ).encode("utf-8")
 
 
 def _assinar_payload(payload: dict) -> str:
-    dados = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    private_key = _carregar_chave_privada()
+    dados = _serializar_payload(payload)
 
-    assinatura = hmac.new(
-        OFFLINE_TICKET_SECRET.encode("utf-8"),
-        dados.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
+    assinatura = private_key.sign(dados)
 
     pacote = {
         "payload": payload,
-        "signature": assinatura
+        "signature": base64.urlsafe_b64encode(assinatura).decode("utf-8")
     }
 
     return base64.urlsafe_b64encode(
@@ -45,6 +62,7 @@ def gerar_ticket_offline(
     offline_ate = agora + timedelta(hours=12)
 
     payload = {
+        "ticket_id": str(uuid.uuid4()),
         "usuario_id": usuario_id,
         "email": email,
         "plano": plano,
@@ -52,6 +70,7 @@ def gerar_ticket_offline(
         "device_id": device_id,
         "fingerprint": fingerprint,
         "license_expires_at": license_expires_at.isoformat(),
+        "issued_at": agora.isoformat(),
         "last_online_check": agora.isoformat(),
         "offline_valid_until": offline_ate.isoformat(),
         "offline_grace_hours": 12,
@@ -60,10 +79,12 @@ def gerar_ticket_offline(
 
     return {
         "offline_ticket": _assinar_payload(payload),
+        "ticket_id": payload["ticket_id"],
         "offline_valid_until": offline_ate.isoformat(),
         "offline_grace_hours": 12,
         "max_offline_drop_minutes": 3
     }
+
 
 def validar_ticket_offline(ticket: str) -> dict | None:
     try:
@@ -71,25 +92,20 @@ def validar_ticket_offline(ticket: str) -> dict | None:
         pacote = json.loads(pacote_json)
 
         payload = pacote.get("payload")
-        assinatura_recebida = pacote.get("signature")
+        assinatura_b64 = pacote.get("signature")
 
-        if not payload or not assinatura_recebida:
+        if not payload or not assinatura_b64:
             return None
 
-        dados = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        dados = _serializar_payload(payload)
+        assinatura = base64.urlsafe_b64decode(assinatura_b64.encode("utf-8"))
 
-        assinatura_correta = hmac.new(
-            OFFLINE_TICKET_SECRET.encode("utf-8"),
-            dados.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
-
-        if not hmac.compare_digest(assinatura_recebida, assinatura_correta):
-            return None
+        public_key = _carregar_chave_publica()
+        public_key.verify(assinatura, dados)
 
         return payload
 
-    except Exception:
+    except (InvalidSignature, Exception):
         return None
 
 

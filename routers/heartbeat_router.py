@@ -5,13 +5,12 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import Usuario, Licenca, Dispositivo
-from schemas.auth_schema import LoginRequest
-from services.ticket_service import emitir_ticket_offline
+from schemas.heartbeat_schema import HeartbeatRequest
 from services.audit_service import registrar_auditoria
 from services.audit_events import AuditEvents
 
 
-router = APIRouter(tags=["License"])
+router = APIRouter(tags=["Heartbeat"])
 
 
 def get_db():
@@ -26,21 +25,18 @@ def get_client_ip(request: Request) -> str | None:
     ip_cliente = request.headers.get("x-forwarded-for")
     if ip_cliente:
         return ip_cliente.split(",")[0].strip()
-
     return request.client.host if request.client else None
 
 
-@router.post("/license/check")
-def check_license(
+@router.post("/heartbeat")
+def heartbeat(
     request: Request,
-    data: LoginRequest,
+    data: HeartbeatRequest,
     db: Session = Depends(get_db)
 ):
     ip_cliente = get_client_ip(request)
 
-    usuario = db.query(Usuario).filter(
-        Usuario.email == data.email
-    ).first()
+    usuario = db.query(Usuario).filter(Usuario.email == data.email).first()
 
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
@@ -48,9 +44,7 @@ def check_license(
     if not usuario.ativo:
         raise HTTPException(status_code=403, detail="Usuário bloqueado.")
 
-    licenca = db.query(Licenca).filter(
-        Licenca.usuario_id == usuario.id
-    ).first()
+    licenca = db.query(Licenca).filter(Licenca.usuario_id == usuario.id).first()
 
     if not licenca:
         raise HTTPException(status_code=403, detail="Licença não encontrada.")
@@ -69,14 +63,16 @@ def check_license(
             registrar_auditoria(
                 db=db,
                 event=AuditEvents.FINGERPRINT_MISMATCH,
-                message="Tentativa de validação com fingerprint diferente.",
+                message="Heartbeat com fingerprint diferente.",
                 usuario_id=usuario.id,
                 email=usuario.email,
                 ip=ip_cliente,
                 device_id=data.device_id,
                 fingerprint=data.fingerprint,
                 metadata={
-                    "fingerprint_cadastrado": dispositivo.fingerprint
+                    "fingerprint_cadastrado": dispositivo.fingerprint,
+                    "app_version": data.app_version,
+                    "sistema": data.sistema
                 }
             )
 
@@ -87,6 +83,7 @@ def check_license(
 
     dispositivo.ultimo_ip = ip_cliente
     dispositivo.ultimo_acesso = datetime.utcnow()
+
     db.commit()
 
     ativo = (
@@ -94,42 +91,27 @@ def check_license(
         and licenca.expira_em > datetime.utcnow()
     )
 
-    ticket_offline = emitir_ticket_offline(
-        db=db,
-        usuario_id=usuario.id,
-        email=usuario.email,
-        plano=licenca.plano,
-        status=licenca.status,
-        device_id=data.device_id,
-        fingerprint=data.fingerprint,
-        license_expires_at=licenca.expira_em
-    )
-
     registrar_auditoria(
         db=db,
-        event=AuditEvents.LICENSE_CHECK,
-        message="Licença validada com sucesso.",
+        event=AuditEvents.HEARTBEAT_RECEIVED,
+        message="Heartbeat recebido do cliente.",
         usuario_id=usuario.id,
         email=usuario.email,
         ip=ip_cliente,
         device_id=data.device_id,
         fingerprint=data.fingerprint,
         metadata={
-            "plano": licenca.plano,
-            "status": licenca.status,
-            "expira_em": licenca.expira_em.isoformat(),
-            "active": ativo
+            "app_version": data.app_version,
+            "sistema": data.sistema,
+            "licenca_ativa": ativo
         }
     )
 
     return {
-        "active": ativo,
+        "status": "ok",
+        "license_active": ativo,
+        "license_status": licenca.status,
         "plan": licenca.plano,
-        "status": licenca.status,
-        "expires_at": licenca.expira_em.isoformat(),
-        "devices_limit": licenca.limite_dispositivos,
-        "offline": ticket_offline,
-        "device_authorized": True,
-        "offline_grace_hours": 12,
-        "max_offline_drop_minutes": 3
+        "server_time": datetime.utcnow().isoformat(),
+        "requires_online": not ativo
     }

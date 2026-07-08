@@ -83,11 +83,66 @@ class Dispositivo(Base):
         back_populates="dispositivos"
     )
 
-    
+
+class OfflineTicket(Base):
+    __tablename__ = "offline_tickets"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    ticket_id = Column(String, unique=True, index=True, nullable=False)
+
+    usuario_id = Column(
+        Integer,
+        ForeignKey("usuarios.id")
+    )
+
+    device_id = Column(String, nullable=False)
+    fingerprint = Column(String)
+
+    emitido_em = Column(DateTime, default=datetime.utcnow)
+    valido_ate = Column(DateTime, nullable=False)
+
+    revogado = Column(Boolean, default=False)
+    revogado_em = Column(DateTime)
+    motivo_revogacao = Column(String)   
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    usuario_id = Column(Integer, nullable=True)
+    email = Column(String, nullable=True)
+
+    event_code = Column(String, nullable=False)
+    event_type = Column(String, nullable=False)
+    message = Column(String, nullable=False)
+
+    ip = Column(String, nullable=True)
+    device_id = Column(String, nullable=True)
+    fingerprint = Column(String, nullable=True)
+
+    metadata_json = Column(String, nullable=True)
+
+    criado_em = Column(DateTime, default=datetime.utcnow)
 
 
+class AppUpdate(Base):
+    __tablename__ = "app_updates"
 
+    id = Column(Integer, primary_key=True, index=True)
 
+    app_name = Column(String, default="certflow-desktop")
+    version = Column(String, nullable=False)
+    min_required_version = Column(String, nullable=False)
+
+    download_url = Column(String, nullable=False)
+    changelog = Column(String)
+
+    ativo = Column(Boolean, default=True)
+    obrigatorio = Column(Boolean, default=False)
+
+    criado_em = Column(DateTime, default=datetime.utcnow)
 
 
     
