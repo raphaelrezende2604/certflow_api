@@ -10,7 +10,5 @@ venv/
 data/
 criar_admin.py
 main.py.save
-cat >> .gitignore <<'EOF'
 keys/
 *.pem
-EOF
