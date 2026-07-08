@@ -10,6 +10,7 @@ from services.audit_events import AuditEvents
 from models import AppUpdate
 from schemas.update_schema import UpdateCreateRequest
 from schemas.update_schema import UpdateCreateRequest, UpdateStatusRequest
+from datetime import datetime, timedelta
 
 
 
@@ -479,4 +480,70 @@ def admin_require_update(
         "id": update.id,
         "version": update.version,
         "obrigatorio": update.obrigatorio
+    }
+
+@router.get("/dashboard/stats")
+def admin_dashboard_stats(
+    admin=Depends(exigir_admin),
+    db: Session = Depends(get_db)
+):
+    agora = datetime.utcnow()
+    ultima_hora = agora - timedelta(hours=1)
+
+    total_usuarios = db.query(Usuario).count()
+    usuarios_ativos = db.query(Usuario).filter(Usuario.ativo == True).count()
+
+    total_licencas = db.query(Licenca).count()
+    licencas_ativas = db.query(Licenca).filter(Licenca.status == "active").count()
+
+    total_dispositivos = db.query(Dispositivo).count()
+    dispositivos_ativos = db.query(Dispositivo).filter(Dispositivo.ativo == True).count()
+    dispositivos_bloqueados = db.query(Dispositivo).filter(Dispositivo.ativo == False).count()
+
+    total_tickets = db.query(OfflineTicket).count()
+    tickets_revogados = db.query(OfflineTicket).filter(OfflineTicket.revogado == True).count()
+    tickets_ativos = db.query(OfflineTicket).filter(
+        OfflineTicket.revogado == False,
+        OfflineTicket.valido_ate > agora
+    ).count()
+
+    heartbeats_ultima_hora = db.query(AuditLog).filter(
+        AuditLog.event_type == "HEARTBEAT_RECEIVED",
+        AuditLog.criado_em >= ultima_hora
+    ).count()
+
+    eventos_seguranca = db.query(AuditLog).filter(
+        AuditLog.event_code.like("SEC%")
+    ).count()
+
+    atualizacoes_ativas = db.query(AppUpdate).filter(
+        AppUpdate.ativo == True
+    ).count()
+
+    return {
+        "usuarios": {
+            "total": total_usuarios,
+            "ativos": usuarios_ativos
+        },
+        "licencas": {
+            "total": total_licencas,
+            "ativas": licencas_ativas
+        },
+        "dispositivos": {
+            "total": total_dispositivos,
+            "ativos": dispositivos_ativos,
+            "bloqueados": dispositivos_bloqueados
+        },
+        "tickets_offline": {
+            "total": total_tickets,
+            "ativos": tickets_ativos,
+            "revogados": tickets_revogados
+        },
+        "monitoramento": {
+            "heartbeats_ultima_hora": heartbeats_ultima_hora,
+            "eventos_seguranca": eventos_seguranca
+        },
+        "atualizacoes": {
+            "ativas": atualizacoes_ativas
+        }
     }
