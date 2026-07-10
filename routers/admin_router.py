@@ -75,10 +75,24 @@ def admin_dashboard(
 
 @router.get("/users")
 def admin_users(
+    email: str | None = None,
+    ativo: bool | None = None,
+    limit: int = 100,
     admin=Depends(exigir_admin),
     db: Session = Depends(get_db)
 ):
-    usuarios = db.query(Usuario).order_by(Usuario.id.desc()).all()
+    if limit > 500:
+        limit = 500
+
+    query = db.query(Usuario)
+
+    if email:
+        query = query.filter(Usuario.email == email)
+
+    if ativo is not None:
+        query = query.filter(Usuario.ativo == ativo)
+
+    usuarios = query.order_by(Usuario.id.desc()).limit(limit).all()
 
     return [
         {
@@ -94,10 +108,28 @@ def admin_users(
 
 @router.get("/licenses")
 def admin_licenses(
+    email: str | None = None,
+    plano: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
     admin=Depends(exigir_admin),
     db: Session = Depends(get_db)
 ):
-    licencas = db.query(Licenca).order_by(Licenca.id.desc()).all()
+    if limit > 500:
+        limit = 500
+
+    query = db.query(Licenca).join(Usuario, Licenca.usuario_id == Usuario.id)
+
+    if email:
+        query = query.filter(Usuario.email == email)
+
+    if plano:
+        query = query.filter(Licenca.plano == plano)
+
+    if status:
+        query = query.filter(Licenca.status == status)
+
+    licencas = query.order_by(Licenca.id.desc()).limit(limit).all()
 
     return [
         {
@@ -110,15 +142,33 @@ def admin_licenses(
             "expira_em": l.expira_em.isoformat() if l.expira_em else None
         }
         for l in licencas
-    ]  
+    ]
 
 
 @router.get("/devices")
 def admin_devices(
+    email: str | None = None,
+    device_id: str | None = None,
+    ativo: bool | None = None,
+    limit: int = 100,
     admin=Depends(exigir_admin),
     db: Session = Depends(get_db)
 ):
-    dispositivos = db.query(Dispositivo).order_by(Dispositivo.id.desc()).all()
+    if limit > 500:
+        limit = 500
+
+    query = db.query(Dispositivo).join(Usuario, Dispositivo.usuario_id == Usuario.id)
+
+    if email:
+        query = query.filter(Usuario.email == email)
+
+    if device_id:
+        query = query.filter(Dispositivo.device_id == device_id)
+
+    if ativo is not None:
+        query = query.filter(Dispositivo.ativo == ativo)
+
+    dispositivos = query.order_by(Dispositivo.id.desc()).limit(limit).all()
 
     return [
         {
@@ -136,7 +186,6 @@ def admin_devices(
         }
         for d in dispositivos
     ]
-
 
 
 @router.post("/block-user")
@@ -334,10 +383,32 @@ def ativar_pago(
 
 @router.get("/audit-logs")
 def admin_audit_logs(
+    email: str | None = None,
+    event_type: str | None = None,
+    event_code: str | None = None,
+    device_id: str | None = None,
+    limit: int = 100,
     admin=Depends(exigir_admin),
     db: Session = Depends(get_db)
 ):
-    logs = db.query(AuditLog).order_by(AuditLog.id.desc()).limit(100).all()
+    if limit > 500:
+        limit = 500
+
+    query = db.query(AuditLog)
+
+    if email:
+        query = query.filter(AuditLog.email == email)
+
+    if event_type:
+        query = query.filter(AuditLog.event_type == event_type)
+
+    if event_code:
+        query = query.filter(AuditLog.event_code == event_code)
+
+    if device_id:
+        query = query.filter(AuditLog.device_id == device_id)
+
+    logs = query.order_by(AuditLog.id.desc()).limit(limit).all()
 
     return [
         {
@@ -359,14 +430,28 @@ def admin_audit_logs(
 
 @router.get("/offline-tickets")
 def admin_offline_tickets(
+    device_id: str | None = None,
+    usuario_id: int | None = None,
+    revogado: bool | None = None,
+    limit: int = 100,
     admin=Depends(exigir_admin),
     db: Session = Depends(get_db)
 ):
-    tickets = (
-        db.query(OfflineTicket)
-        .order_by(OfflineTicket.id.desc())
-        .all()
-    )
+    if limit > 500:
+        limit = 500
+
+    query = db.query(OfflineTicket)
+
+    if device_id:
+        query = query.filter(OfflineTicket.device_id == device_id)
+
+    if usuario_id:
+        query = query.filter(OfflineTicket.usuario_id == usuario_id)
+
+    if revogado is not None:
+        query = query.filter(OfflineTicket.revogado == revogado)
+
+    tickets = query.order_by(OfflineTicket.id.desc()).limit(limit).all()
 
     return [
         {
