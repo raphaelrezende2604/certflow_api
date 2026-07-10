@@ -9,3 +9,4 @@ mercadopago
 passlib[bcrypt]
 slowapi
 cryptography
+alembic

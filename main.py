@@ -20,7 +20,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from database import Base, engine, SessionLocal
+from database import SessionLocal
 from models import Usuario, Licenca, Dispositivo
 from auth import gerar_hash_senha, verificar_senha, criar_token, validar_token
 
@@ -38,7 +38,7 @@ if not ADMIN_SECRET:
     raise RuntimeError("ADMIN_SECRET não configurada no .env")
 
 
-Base.metadata.create_all(bind=engine)
+##Base.metadata.create_all(bind=engine)
 
 limiter = Limiter(key_func=get_remote_address)
 
